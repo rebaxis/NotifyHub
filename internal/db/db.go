@@ -19,8 +19,17 @@ type DB struct {
 	logger *logger.Logger
 }
 
+// DBConfig содержит настройки подключения к БД
+type DBConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	PingTimeout     time.Duration
+	MigrationsPath  string
+}
+
 // NewDB создает новое подключение к базе данных и запускает миграции
-func NewDB(dsn string, log *logger.Logger) (*DB, error) {
+func NewDB(dsn string, log *logger.Logger, cfg DBConfig) (*DB, error) {
 	// Открываем подключение к базе
 	sqlDB, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -28,12 +37,12 @@ func NewDB(dsn string, log *logger.Logger) (*DB, error) {
 	}
 
 	// Настраиваем пул соединений
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(5)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
+	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
+	sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
 	// Проверяем подключение
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.PingTimeout)
 	defer cancel()
 
 	if err := sqlDB.PingContext(ctx); err != nil {
@@ -49,7 +58,7 @@ func NewDB(dsn string, log *logger.Logger) (*DB, error) {
 	}
 
 	// Запускаем миграции
-	if err := db.runMigrations(); err != nil {
+	if err := db.runMigrations(cfg.MigrationsPath); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
@@ -58,14 +67,14 @@ func NewDB(dsn string, log *logger.Logger) (*DB, error) {
 }
 
 // runMigrations применяет миграции базы данных
-func (db *DB) runMigrations() error {
+func (db *DB) runMigrations(migrationsPath string) error {
 	driver, err := postgres.WithInstance(db.DB, &postgres.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to create migration driver: %w", err)
 	}
 
 	m, err := migrate.NewWithDatabaseInstance(
-		"file://migrations",
+		migrationsPath,
 		"postgres",
 		driver,
 	)

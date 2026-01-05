@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/notifyhub/notifyhub/internal/config"
 	"github.com/notifyhub/notifyhub/internal/db"
 	"github.com/notifyhub/notifyhub/internal/lib/logger"
 )
@@ -17,15 +18,17 @@ type HealthChecker interface {
 
 // HealthHandler обрабатывает эндпоинты проверки здоровья
 type HealthHandler struct {
-	db     HealthChecker
-	logger *logger.Logger
+	db             HealthChecker
+	logger         *logger.Logger
+	checkTimeout   time.Duration
 }
 
 // NewHealthHandler создает новый обработчик для проверки здоровья
-func NewHealthHandler(database *db.DB, log *logger.Logger) *HealthHandler {
+func NewHealthHandler(database *db.DB, log *logger.Logger, cfg *config.ServerConfig) *HealthHandler {
 	return &HealthHandler{
-		db:     database,
-		logger: log.WithComponent("health_handler"),
+		db:           database,
+		logger:       log.WithComponent("health_handler"),
+		checkTimeout: cfg.HealthCheckTimeout,
 	}
 }
 
@@ -44,7 +47,7 @@ func (h *HealthHandler) Liveness(w http.ResponseWriter, r *http.Request) {
 
 // Readiness обрабатывает проверку готовности
 func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), h.checkTimeout)
 	defer cancel()
 
 	if err := h.db.HealthCheck(ctx); err != nil {

@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/notifyhub/notifyhub/internal/config"
 	"github.com/notifyhub/notifyhub/internal/db"
 	"github.com/notifyhub/notifyhub/internal/handler"
+	"github.com/notifyhub/notifyhub/internal/lib"
 	"github.com/notifyhub/notifyhub/internal/lib/logger"
 	"github.com/notifyhub/notifyhub/internal/repository"
 	"github.com/notifyhub/notifyhub/internal/service"
@@ -27,6 +27,9 @@ func main() {
 			// Логгер
 			NewLogger,
 
+			// Криптография
+			NewCrypto,
+
 			// База данных
 			NewDatabase,
 
@@ -38,6 +41,7 @@ func main() {
 
 			// Сервисы
 			service.NewAgentService,
+			service.NewCleanupService,
 
 			// Обработчики
 			handler.NewAgentHandler,
@@ -49,8 +53,8 @@ func main() {
 			NewHTTPServer,
 		),
 
-		// Вызываем для запуска сервера
-		fx.Invoke(func(*http.Server) {}),
+		// Вызываем для запуска сервера и воркеров
+		fx.Invoke(func(*http.Server) {}, StartCleanupWorker),
 	)
 
 	app.Run()
@@ -64,9 +68,25 @@ func NewLogger(cfg *config.ServerConfig) (*logger.Logger, error) {
 	})
 }
 
+// NewCrypto создает новый экземпляр Crypto
+func NewCrypto(cfg *config.ServerConfig) *lib.Crypto {
+	return lib.NewCrypto(lib.CryptoConfig{
+		BcryptCost:       cfg.BcryptCost,
+		SecretByteLength: cfg.SecretByteLength,
+	})
+}
+
 // NewDatabase создает новое подключение к базе данных
 func NewDatabase(cfg *config.ServerConfig, log *logger.Logger, lc fx.Lifecycle) (*db.DB, error) {
-	database, err := db.NewDB(cfg.DatabaseDSN, log)
+	dbConfig := db.DBConfig{
+		MaxOpenConns:    cfg.DBMaxOpenConns,
+		MaxIdleConns:    cfg.DBMaxIdleConns,
+		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+		PingTimeout:     cfg.DBPingTimeout,
+		MigrationsPath:  cfg.DBMigrationsPath,
+	}
+
+	database, err := db.NewDB(cfg.DatabaseDSN, log, dbConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +115,7 @@ func NewRouter(
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(middleware.Timeout(cfg.HTTPRequestTimeout))
 	r.Use(logger.HTTPMiddleware(log))
 
 	// Регистрируем маршруты
@@ -117,9 +137,9 @@ func NewHTTPServer(
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  cfg.HTTPReadTimeout,
+		WriteTimeout: cfg.HTTPWriteTimeout,
+		IdleTimeout:  cfg.HTTPIdleTimeout,
 	}
 
 	lc.Append(fx.Hook{
@@ -134,7 +154,7 @@ func NewHTTPServer(
 		},
 		OnStop: func(ctx context.Context) error {
 			log.Info("stopping http server gracefully")
-			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(ctx, cfg.HTTPShutdownTimeout)
 			defer cancel()
 
 			if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -148,4 +168,28 @@ func NewHTTPServer(
 	})
 
 	return srv
+}
+
+// StartCleanupWorker запускает фоновый воркер очистки
+func StartCleanupWorker(
+	cleanupService *service.CleanupService,
+	log *logger.Logger,
+	lc fx.Lifecycle,
+) {
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			log.Info("starting cleanup worker")
+			go func() {
+				if err := cleanupService.Start(context.Background()); err != nil {
+					log.WithError(err).Error("cleanup worker failed")
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			log.Info("stopping cleanup worker")
+			cleanupService.Stop()
+			return nil
+		},
+	})
 }

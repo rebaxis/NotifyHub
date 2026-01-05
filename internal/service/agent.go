@@ -10,19 +10,22 @@ import (
 	"github.com/notifyhub/notifyhub/internal/lib/logger"
 	"github.com/notifyhub/notifyhub/internal/model"
 	"github.com/notifyhub/notifyhub/internal/repository"
+	"golang.org/x/sync/errgroup"
 )
 
 // AgentService управляет бизнес-логикой агентов
 type AgentService struct {
 	repo   repository.AgentRepositoryInterface
 	logger *logger.Logger
+	crypto *lib.Crypto
 }
 
 // NewAgentService создает новый сервис для работы с агентами
-func NewAgentService(repo repository.AgentRepositoryInterface, log *logger.Logger) (*AgentService, error) {
+func NewAgentService(repo repository.AgentRepositoryInterface, log *logger.Logger, crypto *lib.Crypto) (*AgentService, error) {
 	return &AgentService{
 		repo:   repo,
 		logger: log.WithComponent("agent_service"),
+		crypto: crypto,
 	}, nil
 }
 
@@ -31,7 +34,7 @@ func (s *AgentService) RegisterAgent(ctx context.Context, req *model.RegisterAge
 	// Генерируем ID агента, если не передали
 	agentID := req.AgentID
 	if agentID == "" {
-		agentID = lib.GenerateAgentID()
+		agentID = s.crypto.GenerateAgentID()
 		s.logger.WithString("agent_id", agentID).Info("generated agent ID")
 	}
 
@@ -45,13 +48,13 @@ func (s *AgentService) RegisterAgent(ctx context.Context, req *model.RegisterAge
 	}
 
 	// Генерируем секретный ключ
-	secret, err := lib.GenerateSecret()
+	secret, err := s.crypto.GenerateSecret()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate secret: %w", err)
 	}
 
 	// Хешируем секрет для хранения в базе
-	secretHash := lib.HashSecret(secret)
+	secretHash := s.crypto.HashSecret(secret)
 
 	// Собираем объект агента
 	now := time.Now()
@@ -123,7 +126,7 @@ func (s *AgentService) VerifyAgent(ctx context.Context, agentID, secret string) 
 		return fmt.Errorf("failed to get agent: %w", err)
 	}
 
-	if !lib.VerifySecret(secret, agent.SecretHash) {
+	if !s.crypto.VerifySecret(secret, agent.SecretHash) {
 		s.logger.WithString("agent_id", agentID).Warn("invalid agent secret")
 		return model.ErrUnauthorized
 	}
@@ -133,17 +136,41 @@ func (s *AgentService) VerifyAgent(ctx context.Context, agentID, secret string) 
 
 // GetNotifications возвращает список оповещений для агента
 func (s *AgentService) GetNotifications(ctx context.Context, agentID string) ([]interface{}, error) {
-	// Сначала проверяем, что агент существует
-	_, err := s.repo.GetByID(ctx, agentID)
-	if err != nil {
-		// Пробрасываем ErrAgentNotFound без обертки
-		if errors.Is(err, model.ErrAgentNotFound) {
-			return nil, model.ErrAgentNotFound
+	// Параллельно проверяем существование агента и обновляем last_seen
+	g, ctx := errgroup.WithContext(ctx)
+
+	var agent *model.Agent
+	var getErr error
+
+	// Проверяем, что агент существует
+	g.Go(func() error {
+		agent, getErr = s.repo.GetByID(ctx, agentID)
+		if getErr != nil {
+			if errors.Is(getErr, model.ErrAgentNotFound) {
+				return model.ErrAgentNotFound
+			}
+			return fmt.Errorf("failed to get agent: %w", getErr)
 		}
-		return nil, fmt.Errorf("failed to get agent: %w", err)
+		return nil
+	})
+
+	// Обновляем last_seen параллельно
+	g.Go(func() error {
+		if err := s.repo.UpdateLastSeen(ctx, agentID); err != nil {
+			// Логируем, но не прерываем выполнение
+			s.logger.WithError(err).
+				WithString("agent_id", agentID).
+				Warn("failed to update last_seen")
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	// TODO: Реализовать получение оповещений из базы
 	// Пока возвращаем пустой массив
+	_ = agent // используем agent для будущей фильтрации
 	return []interface{}{}, nil
 }

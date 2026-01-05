@@ -5,17 +5,45 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 )
 
 // ServerConfig содержит настройки сервера
 type ServerConfig struct {
+	// Server settings
 	Port                   int    `validate:"required,min=1,max=65535"`
 	DatabaseDSN            string `validate:"required"`
 	AdminToken             string `validate:"required"`
 	AgentRegistrationToken string `validate:"required"`
 	LogLevel               string `validate:"required,oneof=debug info warn error"`
+
+	// HTTP Server timeouts
+	HTTPRequestTimeout  time.Duration `validate:"required"`
+	HTTPReadTimeout     time.Duration `validate:"required"`
+	HTTPWriteTimeout    time.Duration `validate:"required"`
+	HTTPIdleTimeout     time.Duration `validate:"required"`
+	HTTPShutdownTimeout time.Duration `validate:"required"`
+
+	// Database connection pool settings
+	DBMaxOpenConns    int           `validate:"required,min=1"`
+	DBMaxIdleConns    int           `validate:"required,min=1"`
+	DBConnMaxLifetime time.Duration `validate:"required"`
+	DBPingTimeout     time.Duration `validate:"required"`
+	DBMigrationsPath  string        `validate:"required"`
+
+	// Health check settings
+	HealthCheckTimeout time.Duration `validate:"required"`
+
+	// Cleanup service settings
+	CleanupInterval             time.Duration `validate:"required"`
+	NotificationRetentionPeriod time.Duration `validate:"required"`
+	AgentStaleTimeout           time.Duration `validate:"required"`
+
+	// Security settings
+	BcryptCost       int `validate:"required,min=4,max=31"`
+	SecretByteLength int `validate:"required,min=16,max=64"`
 }
 
 // LoadServerConfig загружает конфигурацию сервера из переменных окружения (приоритет) и флагов
@@ -38,6 +66,32 @@ func LoadServerConfig() (*ServerConfig, error) {
 	cfg.AdminToken = getStringConfig(*adminToken, "ADMIN_TOKEN", "")
 	cfg.AgentRegistrationToken = getStringConfig(*agentRegistrationToken, "AGENT_REGISTRATION_TOKEN", "")
 	cfg.LogLevel = getStringConfig(*logLevel, "LOG_LEVEL", "info")
+
+	// HTTP Server timeouts
+	cfg.HTTPRequestTimeout = getDurationConfig("HTTP_REQUEST_TIMEOUT", 60*time.Second)
+	cfg.HTTPReadTimeout = getDurationConfig("HTTP_READ_TIMEOUT", 15*time.Second)
+	cfg.HTTPWriteTimeout = getDurationConfig("HTTP_WRITE_TIMEOUT", 15*time.Second)
+	cfg.HTTPIdleTimeout = getDurationConfig("HTTP_IDLE_TIMEOUT", 60*time.Second)
+	cfg.HTTPShutdownTimeout = getDurationConfig("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second)
+
+	// Database connection pool settings
+	cfg.DBMaxOpenConns = getIntConfig(0, "DB_MAX_OPEN_CONNS", 25)
+	cfg.DBMaxIdleConns = getIntConfig(0, "DB_MAX_IDLE_CONNS", 5)
+	cfg.DBConnMaxLifetime = getDurationConfig("DB_CONN_MAX_LIFETIME", 5*time.Minute)
+	cfg.DBPingTimeout = getDurationConfig("DB_PING_TIMEOUT", 5*time.Second)
+	cfg.DBMigrationsPath = getStringConfig("", "DB_MIGRATIONS_PATH", "file://migrations")
+
+	// Health check settings
+	cfg.HealthCheckTimeout = getDurationConfig("HEALTH_CHECK_TIMEOUT", 2*time.Second)
+
+	// Cleanup service settings
+	cfg.CleanupInterval = getDurationConfig("CLEANUP_INTERVAL", 5*time.Minute)
+	cfg.NotificationRetentionPeriod = getDurationConfig("NOTIFICATION_RETENTION_PERIOD", 7*24*time.Hour) // 7 days
+	cfg.AgentStaleTimeout = getDurationConfig("AGENT_STALE_TIMEOUT", 30*time.Minute)
+
+	// Security settings
+	cfg.BcryptCost = getIntConfig(0, "BCRYPT_COST", 10) // bcrypt.DefaultCost = 10
+	cfg.SecretByteLength = getIntConfig(0, "SECRET_BYTE_LENGTH", 32)
 
 	// Валидируем конфигурацию
 	validate := validator.New()
@@ -76,6 +130,19 @@ func getIntConfig(flagValue int, envKey string, defaultValue int) int {
 	// Флаг второго приоритета
 	if flagValue != 0 {
 		return flagValue
+	}
+
+	// Значение по умолчанию
+	return defaultValue
+}
+
+// getDurationConfig возвращает значение из env, если есть, иначе дефолт
+func getDurationConfig(envKey string, defaultValue time.Duration) time.Duration {
+	// Переменная окружения имеет наивысший приоритет
+	if envValue := os.Getenv(envKey); envValue != "" {
+		if duration, err := time.ParseDuration(envValue); err == nil {
+			return duration
+		}
 	}
 
 	// Значение по умолчанию
