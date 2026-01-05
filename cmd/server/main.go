@@ -31,7 +31,10 @@ func main() {
 			NewDatabase,
 
 			// Репозитории
-			repository.NewAgentRepository,
+			fx.Annotate(
+				repository.NewAgentRepository,
+				fx.As(new(repository.AgentRepositoryInterface)),
+			),
 
 			// Сервисы
 			service.NewAgentService,

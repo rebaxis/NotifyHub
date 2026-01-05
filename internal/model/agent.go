@@ -14,6 +14,16 @@ type Agent struct {
 	UpdatedAt  time.Time              `json:"updated_at"`
 }
 
+// GetID возвращает ID агента (реализация интерфейса Entity)
+func (a *Agent) GetID() string {
+	return a.ID
+}
+
+// SetID устанавливает ID агента (реализация интерфейса Entity)
+func (a *Agent) SetID(id string) {
+	a.ID = id
+}
+
 // Константы статусов агента
 const (
 	AgentStatusActive  = "active"

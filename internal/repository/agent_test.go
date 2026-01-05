@@ -34,13 +34,14 @@ func TestAgentRepository_Update(t *testing.T) {
 	t.Skip("Integration test - requires database")
 }
 
-// Пример как выглядел бы полный тест:
+// Пример как выглядел бы полный тест с использованием дженериков:
 func exampleFullTest(t *testing.T) {
 	// Это не выполняется - просто пример
 	ctx := context.Background()
 
 	// Здесь бы создали тестовую базу
 	// repo := NewAgentRepository(testDB, logger)
+	// var genericRepo repository.Repository[*model.Agent] = repo
 
 	agent := &model.Agent{
 		ID:         "test-agent",
@@ -55,9 +56,4 @@ func exampleFullTest(t *testing.T) {
 
 	_ = agent
 	_ = ctx
-
-	// err := repo.Create(ctx, agent)
-	// if err != nil {
-	//     t.Fatalf("failed to create agent: %v", err)
-	// }
 }

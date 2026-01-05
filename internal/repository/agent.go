@@ -12,67 +12,46 @@ import (
 	"github.com/notifyhub/notifyhub/internal/model"
 )
 
+// AgentRepositoryInterface определяет интерфейс для работы с агентами
+type AgentRepositoryInterface interface {
+	Repository[*model.Agent]
+	UpdateLastSeen(ctx context.Context, agentID string) error
+}
+
 // AgentRepository работает с агентами в базе данных
 type AgentRepository struct {
+	*BaseRepository[*model.Agent]
 	db     *db.DB
 	logger *logger.Logger
 }
 
 // NewAgentRepository создает репозиторий для работы с агентами
 func NewAgentRepository(database *db.DB, log *logger.Logger) *AgentRepository {
-	return &AgentRepository{
-		db:     database,
-		logger: log.WithComponent("agent_repository"),
-	}
-}
+	componentLogger := log.WithComponent("agent_repository")
 
-// Create добавляет нового агента в базу
-func (r *AgentRepository) Create(ctx context.Context, agent *model.Agent) error {
-	// Превращаем метаданные в JSON для хранения
-	metadataJSON, err := json.Marshal(agent.Metadata)
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-
-	query := `
-		INSERT INTO agents (id, namespace, metadata, secret_hash, last_seen, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`
-
-	_, err = r.db.ExecContext(ctx, query,
-		agent.ID,
-		agent.Namespace,
-		metadataJSON,
-		agent.SecretHash,
-		agent.LastSeen,
-		agent.Status,
-		agent.CreatedAt,
-		agent.UpdatedAt,
+	// Создаем базовый репозиторий с функциями для работы с агентами
+	baseRepo := NewBaseRepository[*model.Agent](
+		database,
+		componentLogger,
+		"agents",
+		scanAgent,
+		insertAgent,
+		updateAgent,
 	)
 
-	if err != nil {
-		return fmt.Errorf("failed to create agent: %w", err)
+	return &AgentRepository{
+		BaseRepository: baseRepo,
+		db:             database,
+		logger:         componentLogger,
 	}
-
-	r.logger.WithString("agent_id", agent.ID).
-		WithString("namespace", agent.Namespace).
-		Info("agent created")
-
-	return nil
 }
 
-// GetByID достает агента из базы по его ID
-func (r *AgentRepository) GetByID(ctx context.Context, agentID string) (*model.Agent, error) {
-	query := `
-		SELECT id, namespace, metadata, secret_hash, last_seen, status, created_at, updated_at
-		FROM agents
-		WHERE id = $1
-	`
-
+// scanAgent функция для сканирования строки БД в агента
+func scanAgent(row *sql.Row) (*model.Agent, error) {
 	agent := &model.Agent{}
 	var metadataJSON []byte
 
-	err := r.db.QueryRowContext(ctx, query, agentID).Scan(
+	err := row.Scan(
 		&agent.ID,
 		&agent.Namespace,
 		&metadataJSON,
@@ -87,7 +66,7 @@ func (r *AgentRepository) GetByID(ctx context.Context, agentID string) (*model.A
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, model.ErrAgentNotFound
 		}
-		return nil, fmt.Errorf("failed to get agent: %w", err)
+		return nil, fmt.Errorf("failed to scan agent: %w", err)
 	}
 
 	// Парсим JSON обратно в структуру
@@ -98,8 +77,39 @@ func (r *AgentRepository) GetByID(ctx context.Context, agentID string) (*model.A
 	return agent, nil
 }
 
-// Update обновляет данные существующего агента
-func (r *AgentRepository) Update(ctx context.Context, agent *model.Agent) error {
+// insertAgent функция для вставки агента в БД
+func insertAgent(ctx context.Context, database *db.DB, agent *model.Agent) error {
+	// Превращаем метаданные в JSON для хранения
+	metadataJSON, err := json.Marshal(agent.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	query := `
+		INSERT INTO agents (id, namespace, metadata, secret_hash, last_seen, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+
+	_, err = database.ExecContext(ctx, query,
+		agent.ID,
+		agent.Namespace,
+		metadataJSON,
+		agent.SecretHash,
+		agent.LastSeen,
+		agent.Status,
+		agent.CreatedAt,
+		agent.UpdatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert agent: %w", err)
+	}
+
+	return nil
+}
+
+// updateAgent функция для обновления агента в БД
+func updateAgent(ctx context.Context, database *db.DB, agent *model.Agent) error {
 	// Снова превращаем метаданные в JSON
 	metadataJSON, err := json.Marshal(agent.Metadata)
 	if err != nil {
@@ -112,7 +122,7 @@ func (r *AgentRepository) Update(ctx context.Context, agent *model.Agent) error 
 		WHERE id = $1
 	`
 
-	result, err := r.db.ExecContext(ctx, query,
+	result, err := database.ExecContext(ctx, query,
 		agent.ID,
 		agent.Namespace,
 		metadataJSON,
@@ -135,24 +145,7 @@ func (r *AgentRepository) Update(ctx context.Context, agent *model.Agent) error 
 		return model.ErrAgentNotFound
 	}
 
-	r.logger.WithString("agent_id", agent.ID).
-		WithString("status", agent.Status).
-		Info("agent updated")
-
 	return nil
-}
-
-// Exists проверяет, есть ли агент с таким ID в базе
-func (r *AgentRepository) Exists(ctx context.Context, agentID string) (bool, error) {
-	query := `SELECT EXISTS(SELECT 1 FROM agents WHERE id = $1)`
-
-	var exists bool
-	err := r.db.QueryRowContext(ctx, query, agentID).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("failed to check agent existence: %w", err)
-	}
-
-	return exists, nil
 }
 
 // UpdateLastSeen обновляет время последнего визита агента

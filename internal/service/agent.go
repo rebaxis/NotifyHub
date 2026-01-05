@@ -14,12 +14,12 @@ import (
 
 // AgentService управляет бизнес-логикой агентов
 type AgentService struct {
-	repo   *repository.AgentRepository
+	repo   repository.AgentRepositoryInterface
 	logger *logger.Logger
 }
 
 // NewAgentService создает новый сервис для работы с агентами
-func NewAgentService(repo *repository.AgentRepository, log *logger.Logger) (*AgentService, error) {
+func NewAgentService(repo repository.AgentRepositoryInterface, log *logger.Logger) (*AgentService, error) {
 	return &AgentService{
 		repo:   repo,
 		logger: log.WithComponent("agent_service"),
