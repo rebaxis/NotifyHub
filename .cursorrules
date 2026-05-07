@@ -1,0 +1,328 @@
+# NotifyHub Project Rules
+
+## Project Overview
+Universal notification service with server-agent architecture for distributed agents.
+- **Language**: Go ≥ 1.24
+- **Database**: PostgreSQL ≥ 14
+- **Architecture**: Server-agent pull-based polling pattern
+- **Deployment**: Local (single host, no Kubernetes)
+
+## Project Structure (Strict)
+
+```
+notifyhub/
+├── cmd/
+│   ├── server/         # Server main package
+│   └── agent/          # Agent main package
+├── internal/
+│   ├── config/         # Configuration loading and validation
+│   ├── handler/        # HTTP request handlers
+│   ├── service/        # Business logic
+│   ├── repository/     # Data access layer
+│   ├── db/             # PostgreSQL initialization
+│   ├── auth/           # Authentication and authorization
+│   ├── model/          # Domain entities (no logic)
+│   └── lib/            # Helper utilities
+├── migrations/         # SQL migration files
+├── doc/                # Documentation
+└── README.md           # Quick start and curl examples
+```
+
+## Required Libraries (DO NOT SUBSTITUTE)
+
+```go
+// Dependency Injection
+"go.uber.org/fx"
+
+// HTTP Router
+"github.com/go-chi/chi/v5"
+
+// Validation
+"github.com/go-playground/validator/v10"
+
+// JWT
+"github.com/golang-jwt/jwt/v4"
+
+// PostgreSQL Driver
+"github.com/jackc/pgx/v5/stdlib"
+
+// Migrations
+"github.com/golang-migrate/migrate/v4"
+
+// Caching
+"github.com/patrickmn/go-cache"
+
+// Logging
+"go.uber.org/zap"
+```
+
+## Code Style & Conventions
+
+### General Go Standards
+- Follow official Go style guide and `gofmt`
+- Use `golangci-lint` for linting
+- Package names: lowercase, single word, no underscores
+- Variable/function names: camelCase (unexported), PascalCase (exported)
+- Error handling: NEVER ignore errors, always check and handle
+- Context: pass `context.Context` as first parameter in functions that do I/O
+
+### Naming Conventions
+- **Agents**: Use `agent_id` (with underscore) in DB, `agentID` in Go code
+- **Namespaces**: String identifiers like `team-a`, `team-123`, `user-456`
+- **Metadata**: Always JSONB in DB, `map[string]interface{}` or custom struct in Go
+- **Tables**: Plural names (`agents`, `notifications`)
+- **Structs**: Singular names (`Agent`, `Notification`)
+
+### Configuration
+- Use environment variables for all configuration
+- Support command-line arguments as override
+- Validate ALL configuration on startup
+- Use structured config structs with validation tags
+- Example:
+```go
+type Config struct {
+    ServerURL string `validate:"required,url"`
+    Port      int    `validate:"required,min=1,max=65535"`
+    DatabaseDSN   string `validate:"required"`
+}
+```
+
+## Database Standards
+
+### Schema Rules
+- Primary keys: `id` column (TEXT for agents, UUID for notifications)
+- Timestamps: Use `TIMESTAMPTZ` (timezone-aware)
+- All tables MUST have `created_at` timestamp
+- Use `JSONB` for flexible metadata (NOT JSON)
+- Create indexes for filtering columns (expires_at, namespace, etc.)
+
+### Query Practices
+- Use parameterized queries ALWAYS (prevent SQL injection)
+- Use transactions for multi-row operations
+- Implement proper connection pooling
+- Handle `pgx` errors appropriately
+- Use migrations for ALL schema changes (no manual ALTER TABLE)
+
+### Filtering Logic (Critical)
+Notification filtering MUST check ALL conditions:
+1. `NOW() < expires_at`
+2. `target_namespaces` contains `"*"` OR agent's namespace in array
+3. Agent's `metadata` contains all key-value pairs from `target_metadata` (partial match)
+
+## Authentication & Security
+
+### Agent Authentication
+- Header: `X-Agent-ID: <id>` + `X-Agent-Secret: <secret>`
+- Alternative: JWT in `Authorization: Bearer <token>` with agent_id in payload
+- Secrets: Store bcrypt/SHA256 hashed in `secret_hash` column
+- NEVER log secrets in plaintext
+
+### Admin Authentication
+- Header: `Authorization: Bearer <ADMIN_TOKEN>`
+- Static tokens from environment variable
+- Separate from agent authentication logic
+
+### Endpoints Access
+- `/live`, `/ready`: Public (no auth)
+- `/api/v1/agents/register`: Anonymous (consider rate limiting)
+- All other `/api/v1/*`: Require authentication
+
+## API Standards
+
+### REST Conventions
+- Use standard HTTP methods: GET, POST, PUT, DELETE
+- Version API: `/api/v1/...`
+- Return proper status codes:
+  - 200: Success (GET, PUT)
+  - 201: Created (POST)
+  - 400: Bad request
+  - 401: Unauthorized
+  - 404: Not found
+  - 500: Internal error
+
+### Request/Response Format
+- Content-Type: `application/json`
+- All timestamps in RFC3339 format (ISO 8601)
+- Error responses:
+```json
+{
+  "error": "error message",
+  "code": "ERROR_CODE",
+  "details": {}
+}
+```
+
+### API Endpoints (Must Implement)
+1. `POST /api/v1/agents/register` - Register new agent
+2. `PUT /api/v1/agents/{agent_id}` - Update agent metadata & ping
+3. `GET /api/v1/agents/{agent_id}/notifications` - Get agent notifications
+4. `POST /api/v1/notifications` - Create notification (admin only)
+5. `GET /live` - Liveness probe
+6. `GET /ready` - Readiness probe (check DB connection)
+
+## Logging Standards
+
+### Structured Logging (zap)
+- Format: JSON to stdout
+- Include context fields: `{"component":"server", "agent_id":"...", "event":"..."}`
+- Log levels:
+  - DEBUG: Development details
+  - INFO: Normal operations, startup, shutdown
+  - WARN: Recoverable errors, retries
+  - ERROR: Errors requiring attention
+- NEVER log sensitive data (secrets, tokens)
+
+### Key Events to Log
+- Agent registration
+- Notification creation
+- Cleanup operations with stats
+- Authentication failures
+- Network errors with retry attempts
+
+## Agent Implementation
+
+### Configuration (Environment Variables)
+- `NOTIF_SERVER_URL` (required): Server base URL
+- `AGENT_NAMESPACE` (required): Logical group
+- `AGENT_METADATA_JSON` (required): JSON string with metadata
+- `AGENT_ID` (optional): Unique ID, generate if not provided
+- `AGENT_SECRET` (optional): For re-registration
+- `NOTIF_FILE_PATH` (optional, default: `./notifications.json`)
+- `POLL_INTERVAL_SEC` (optional, default: `60`)
+- `MAX_RETRY_BACKOFF_SEC` (optional, default: `300`)
+
+### Error Handling & Retry Logic
+- **401 Unauthorized**: Re-register (secret invalid)
+- **404 Not Found**: Re-register (agent lost)
+- **Network errors**: Exponential backoff: 5s → 10s → 20s → 40s → max
+- Continue polling indefinitely, never give up
+- Log all errors with context
+
+### Graceful Shutdown
+- Handle `SIGINT`/`SIGTERM`
+- Complete current poll cycle
+- Optional: Send final `PUT` with `status=offline`
+- Exit cleanly
+
+### Output File Format
+```json
+[
+  {
+    "id": "uuid",
+    "title": "string",
+    "body": "string",
+    "expires_at": "2025-12-20T04:00:00Z",
+    "priority": "low|medium|high",
+    "received_at": "2025-12-18T14:30:00Z"
+  }
+]
+```
+- `received_at` is added by agent (current time)
+- File must be valid JSON (atomic write recommended)
+
+## Background Tasks (Server)
+
+### Cleanup Worker
+- Run every 5 minutes in goroutine
+- Tasks:
+  1. Delete notifications with `expires_at < NOW() - interval '7 days'`
+  2. Update `status = 'stale'` for agents with `last_seen < NOW() - interval '30 minutes'`
+- Log statistics: `{"event":"cleanup","deleted_notifications":N,"stale_agents":M}`
+
+## Testing Requirements
+
+### Coverage
+- Minimum 60% unit test coverage
+- Test all business logic in `service/` and `repository/`
+- Test HTTP handlers with mock dependencies
+
+### Testing Practices
+- Use table-driven tests where appropriate
+- Mock external dependencies (DB, HTTP)
+- Use `testify/assert` or `testify/require` for assertions
+- Test error cases, not just happy paths
+- Use `t.Parallel()` where possible
+
+### Integration Tests
+- Test server-agent communication
+- Test database queries with real PostgreSQL (docker/testcontainers)
+- Test notification filtering logic thoroughly
+
+## Error Handling Patterns
+
+```go
+// Always wrap errors with context
+return fmt.Errorf("failed to register agent: %w", err)
+
+// Check errors immediately
+if err != nil {
+    return err
+}
+
+// Use typed errors for specific cases
+var ErrAgentNotFound = errors.New("agent not found")
+var ErrUnauthorized = errors.New("unauthorized")
+```
+
+## Critical Business Logic
+
+### Notification Filtering (DO NOT MODIFY LOGIC)
+An agent receives notification if ALL conditions are true:
+1. Notification not expired: `NOW() < expires_at`
+2. Namespace matches: 
+   - `target_namespaces` contains `"*"` (wildcard), OR
+   - Agent's namespace in `target_namespaces` array
+3. Metadata matches:
+   - All key-value pairs from notification's `target_metadata` exist in agent's `metadata`
+   - Agent can have additional metadata fields (partial match)
+   - Example: target `{"version":"1"}` matches agent `{"version":"1","region":"ru"}`
+
+### Agent Registration Flow
+1. Generate `agent_id` if not provided (`agent-{uuid}`)
+2. Call `POST /api/v1/agents/register` with `agent_id`, `namespace`, `metadata`
+3. Server generates secret, hashes it, stores in DB
+4. Server returns `{"agent_id":"...", "secret":"..."}`
+5. Agent stores secret in memory (not on disk)
+6. Agent uses secret for subsequent requests
+
+## Out of Scope (DO NOT IMPLEMENT)
+- Admin UI
+- RBAC or multi-level roles
+- Kubernetes deployment
+- Message queue integration
+- WebSocket or push notifications
+- Multi-host deployment
+
+## Build & Development
+
+### Commands
+- Build: `go build ./...`
+- Test: `go test ./...`
+- Lint: `golangci-lint run`
+- Format: `gofmt -s -w .`
+
+### Dependencies
+- Use Go modules (`go.mod`, `go.sum`)
+- Pin library versions for reproducibility
+- Run `go mod tidy` after adding dependencies
+
+## Acceptance Criteria (Verify Before Completion)
+
+1. ✓ Server starts and creates tables on first run
+2. ✓ Agent registers, receives secret, saves notifications to file
+3. ✓ Notifications filtered correctly by namespace and metadata
+4. ✓ `expires_at` is respected in filtering
+5. ✓ Agent survives 5-minute server downtime and recovers
+6. ✓ All components build with `go build ./...`
+7. ✓ All tests pass with `go test ./...`
+8. ✓ Test coverage ≥ 60%
+
+## Additional Notes
+
+- Prefer composition over inheritance
+- Keep functions small and focused (single responsibility)
+- Document public APIs with godoc comments
+- Use interfaces for testability
+- Avoid global state (use dependency injection via fx)
+- Handle context cancellation properly in long-running operations
+

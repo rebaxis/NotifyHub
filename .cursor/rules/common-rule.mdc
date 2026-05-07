@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+
+# Additional Notes by Human
+- don't use docker
+- for configuration using flags which less importan then ENVs
+- don't create files in doc/ directory
+- don't use Makefile
